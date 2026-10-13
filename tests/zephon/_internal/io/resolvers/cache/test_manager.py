@@ -1569,3 +1569,139 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
         assert ref.raw.path.read_bytes() == data
     finally:
         mgr.close()
+
+
+def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalizing an old manager while a new lock acquires .reset.lock must not hang.
+
+    Regression test for #20: GC can invoke an older CacheManager's
+    weakref.finalize callback inside the window where another FileLock
+    instance has already acquired the OS lock on ``.reset.lock`` (inside
+    ``FileLock._acquire``) before filelock finishes its acquisition
+    bookkeeping. A blocking ``with reset_lock:`` in the finalizer
+    deadlocks the thread against itself.
+    """
+    from multiprocessing.shared_memory import SharedMemory
+
+    from filelock import FileLock
+
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"finalizer-overlap" * 8
+    raw_name = "overlap.bin"
+    _make_file(remote / raw_name, data)
+    storage = LocalFSBackend(root=remote)
+    loc = _locator("demo", 400, str(remote), raw_name=raw_name, raw_bytes=len(data))
+
+    mgr1 = _make_manager(cache_root, storage, [loc], persist_state=True)
+    mgr1.resolve(loc)
+    assert mgr1._shared is not None
+    old_shm_names = dict(mgr1._shared.shm_names)
+
+    # Inject mgr1's finalizer into the exact acquisition window of mgr2's
+    # .reset.lock (after the OS lock is held, before _acquire returns).
+    orig_filelock = manager_mod.FileLock
+    fired = False
+
+    def hooked_filelock(lock_file: str | os.PathLike[str], *args: Any, **kwargs: Any):
+        lock = orig_filelock(lock_file, *args, **kwargs)
+        if Path(lock_file).name == manager_mod._RESET_LOCK_FILENAME:
+            native_acquire = lock._acquire
+
+            def interrupted_acquire() -> None:
+                nonlocal fired
+                native_acquire()
+                if not fired:
+                    assert lock.is_locked
+                    fired = True
+                    mgr1._close_finalizer()
+
+            lock._acquire = interrupted_acquire  # type: ignore[method-assign]
+        return lock
+
+    monkeypatch.setattr(manager_mod, "FileLock", hooked_filelock)
+
+    # Run construction on a worker thread with a tight join timeout so a
+    # regression fails fast instead of hanging the test suite.
+    mgr2_holder: list[CacheManager] = []
+    err_holder: list[BaseException] = []
+
+    def build_mgr2() -> None:
+        try:
+            mgr2_holder.append(
+                _make_manager(cache_root, storage, [loc], persist_state=True)
+            )
+        except BaseException as exc:  # pragma: no cover
+            err_holder.append(exc)
+
+    worker = threading.Thread(target=build_mgr2, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), (
+        "CacheManager init deadlocked when finalizer ran during .reset.lock acquisition"
+    )
+    assert not err_holder, f"Unexpected error building mgr2: {err_holder[0]!r}"
+    assert fired is True
+
+    mgr2 = mgr2_holder[0]
+    try:
+        # mgr1 was the last owner when finalized during mgr2's lock
+        # acquisition, so its old SHM segments must have been unlinked
+        # and mgr2 must have resumed cleanly as the sole live owner.
+        for shm_name in old_shm_names.values():
+            with pytest.raises(FileNotFoundError):
+                shm = SharedMemory(name=shm_name, create=False)
+                shm.close()
+
+        session_path = cache_root / ".zephon_cache_state" / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session["owners"][mgr2._owner_key]["instances"] == 1
+        assert mgr2.stats().shards == 1
+
+        # Also verify the multi-owner / external-lock deferred path:
+        # join a third manager (instances -> 2), then trigger mgr2's
+        # finalizer while an independent FileLock is mid-acquisition of
+        # .reset.lock. The background flush must decrement instances to 1
+        # once the lock is released while keeping mgr3's SHM segments live.
+        monkeypatch.setattr(manager_mod, "FileLock", orig_filelock)
+        mgr3 = _make_manager(cache_root, storage, [loc], persist_state=True)
+        try:
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            assert session["owners"][mgr3._owner_key]["instances"] == 2
+
+            ext_lock = FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME))
+            ext_native_acquire = ext_lock._acquire
+
+            def ext_interrupted_acquire() -> None:
+                ext_native_acquire()
+                assert ext_lock.is_locked
+                mgr2._close_finalizer()
+
+            ext_lock._acquire = ext_interrupted_acquire  # type: ignore[method-assign]
+            with ext_lock:
+                pass
+
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+                if session["owners"].get(mgr3._owner_key, {}).get("instances") == 1:
+                    break
+                time.sleep(0.02)
+            assert session["owners"][mgr3._owner_key]["instances"] == 1
+
+            # mgr3 is still a live owner, so its SHM segments must still exist.
+            assert mgr3._shared is not None
+            for shm_name in mgr3._shared.shm_names.values():
+                shm = SharedMemory(name=shm_name, create=False)
+                shm.close()
+        finally:
+            mgr3.close()
+    finally:
+        mgr2.close()
+
+    # After the last owner (mgr3) closes, owners is empty and SHM is unlinked.
+    final_session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert final_session["owners"] == {}
