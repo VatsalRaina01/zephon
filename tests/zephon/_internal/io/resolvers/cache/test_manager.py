@@ -475,9 +475,7 @@ def test_eviction_chooses_coldest_when_capacity_exceeded(
     storage = LocalFSBackend(root=remote)
     loc_a = _locator("demo", 10, str(remote), raw_name="a.bin", raw_bytes=len(data_a))
     loc_b = _locator("demo", 11, str(remote), raw_name="b.bin", raw_bytes=len(data_b))
-    loc_c = _locator(
-        "demo", 12, str(remote), raw_name="c.bin", raw_bytes=len(data_c)
-    )
+    loc_c = _locator("demo", 12, str(remote), raw_name="c.bin", raw_bytes=len(data_c))
 
     mgr = _make_manager(
         cache_root, storage, [loc_a, loc_b, loc_c], limit_bytes=6 * 1024
@@ -723,7 +721,7 @@ def test_resume_preserves_files_with_matching_fingerprint(tmp_path: Path) -> Non
         assert stats.shards == 1
         assert stats.bytes_used == len(data)
 
-        # Subsequent resolve is a cache hit — no re-download.
+        # Subsequent resolve is a cache hit - no re-download.
         ref2 = mgr2.resolve(loc)
         assert ref2.cache_hit is True
     finally:
@@ -869,7 +867,7 @@ def test_join_succeeds_with_matching_fingerprint_and_live_owners(
         mgr1.resolve(loc)
         mgr2 = _make_manager(cache_root, storage, [loc], persist_state=True)
         try:
-            # Same session — the file is still present and a resolve is a hit.
+            # Same session - the file is still present and a resolve is a hit.
             ref = mgr2.resolve(loc)
             assert ref.cache_hit is True
         finally:
@@ -1161,7 +1159,9 @@ def test_multiprocess_eviction_coldest(tmp_path: Path) -> None:
     path_c = cache_root / "demo" / "c.bin"
     idx_a = mgr_parent._catalog_set.slot_of("demo", 100)
     idx_b = mgr_parent._catalog_set.slot_of("demo", 101)
-    idx_c = mgr_parent._catalog_set.slot_of("demo", 102)
+    idx_c = mgr_parent._catalog_set.slot_of(
+        "demo", 102
+    )  # restored single-line format
     shared = mgr_parent._shared
     assert shared is not None
     state_a = _ShardState(shared.shard_states[idx_a])
@@ -1305,7 +1305,7 @@ def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> No
 
     Reproduces the CI failure where the creator had already unlinked SHM
     while joiners were still registered as live owners of the session.
-    The join attempt must not raise FileNotFoundError — it must
+    The join attempt must not raise FileNotFoundError - it must
     gracefully downgrade into the no-live-owners branch.
 
     Exercising the *live_owners* path (rather than the empty-owners
@@ -1327,7 +1327,7 @@ def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> No
     try:
         mgr1.resolve(loc)
 
-        # mgr1 is still alive — session.json records us as a live owner.
+        # mgr1 is still alive - session.json records us as a live owner.
         # Unlink SHM behind mgr1's back to simulate /dev/shm cleanup or a
         # creator-exits-first race on an older manager build.
         session = json.loads(mgr1._session_path.read_text(encoding="utf-8"))
@@ -1369,7 +1369,7 @@ def test_parse_proc_stat_starttime_extracts_field_22() -> None:
     from zephon._internal.io.resolvers.cache.manager import _parse_proc_stat_starttime
 
     # Build a tail of exactly 20 fields (state through starttime). Index
-    # 19 in this tail is starttime — set it to 4242 with a sentinel; the
+    # 19 in this tail is starttime - set it to 4242 with a sentinel; the
     # other slots are filler. Trailing fields (vsize, rss, ...) are
     # appended to mirror real procfs output and prove the parser doesn't
     # care about them.
@@ -1380,7 +1380,7 @@ def test_parse_proc_stat_starttime_extracts_field_22() -> None:
     stat = b"123 (python) " + tail
     assert _parse_proc_stat_starttime(stat) == 4242
 
-    # Comm with spaces and parens — common for renamed processes — must
+    # Comm with spaces and parens - common for renamed processes - must
     # not confuse the parser since we anchor on the rightmost ``)``.
     stat_tricky = b"123 (weird (proc) name) " + tail
     assert _parse_proc_stat_starttime(stat_tricky) == 4242
@@ -1456,7 +1456,7 @@ def test_recycled_pid_does_not_block_init_when_start_time_mismatches(
     loc_b = _locator("demo", 111, str(remote), raw_name="b.bin", raw_bytes=len(data))
 
     # Seed a session with the v1 fingerprint, then close cleanly so the
-    # owner is dropped — leaves session.json with empty owners and stale
+    # owner is dropped - leaves session.json with empty owners and stale
     # SHM names that the next init will unlink.
     mgr1 = _make_manager(cache_root, storage, [loc_a], persist_state=True)
     mgr1.close()
@@ -1467,7 +1467,7 @@ def test_recycled_pid_does_not_block_init_when_start_time_mismatches(
     # form belt-and-suspenders identity.
     session_path = cache_root / ".zephon_cache_state" / "session.json"
     session = json.loads(session_path.read_text(encoding="utf-8"))
-    bogus_key = f"{os.getpid()}-1"  # start-time "1ns" — far from current
+    bogus_key = f"{os.getpid()}-1"  # start-time "1ns" - far from current
     session["owners"] = {
         bogus_key: {
             "instances": 1,
@@ -1477,7 +1477,7 @@ def test_recycled_pid_does_not_block_init_when_start_time_mismatches(
     }
     session_path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
 
-    # Different locator set ⇒ fingerprint mismatch. With pid-recycle
+    # Different locator set => fingerprint mismatch. With pid-recycle
     # detection, the ghost is pruned and we COLD_RESET cleanly.
     mgr2 = _make_manager(cache_root, storage, [loc_a, loc_b], persist_state=True)
     try:
@@ -1520,7 +1520,7 @@ def test_legacy_owner_entry_without_start_time_is_treated_as_alive(
         session["owners"] = legacy_owners
         session_path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
 
-        # Same fingerprint + live owner ⇒ JOIN. No HARD_ERROR, no reset.
+        # Same fingerprint + live owner => JOIN. No HARD_ERROR, no reset.
         mgr2 = _make_manager(cache_root, storage, [loc], persist_state=True)
         try:
             ref = mgr2.resolve(loc)
@@ -1552,7 +1552,7 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
 
     mgr = _make_manager(cache_root, storage, [loc])
     try:
-        # Force the shard into PREPARING without holding shard_lock —
+        # Force the shard into PREPARING without holding shard_lock -
         # mimics a worker that started a download then died mid-flight
         # (kernel released its shard_lock automatically on death).
         index = mgr._index_for(loc)
@@ -1561,12 +1561,12 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
             mgr._shared.shard_states[index] = _ShardState.PREPARING
 
         # resolve() must complete (not loop). Bound the call with a
-        # generous deadline — anything more than a couple of seconds
+        # generous deadline - anything more than a couple of seconds
         # would indicate the recovery path failed.
         start = time.time()
         ref = mgr.resolve(loc)
         elapsed = time.time() - start
-        assert elapsed < 10.0, f"resolve took {elapsed:.2f}s — recovery failed"
+        assert elapsed < 10.0, f"resolve took {elapsed:.2f}s - recovery failed"
         assert ref.raw.path.exists()
         assert ref.raw.path.read_bytes() == data
     finally:
@@ -1603,10 +1603,16 @@ def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
     assert mgr1._shared is not None
     old_shm_names = dict(mgr1._shared.shm_names)
 
-    # Also test the exact snippet from review feedback simulating GC mid-drain:
-    with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
-        with manager_mod._PENDING_RELEASES_LOCK:
-            mgr1._close_finalizer()  # should not hang with SimpleQueue
+    # Run the exact snippet simulating GC mid-drain on a worker thread with a join timeout.
+    def run_gc_snippet() -> None:
+        with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
+            with manager_mod._PENDING_RELEASES_LOCK:
+                mgr1._close_finalizer()
+
+    t_snippet = threading.Thread(target=run_gc_snippet, daemon=True)
+    t_snippet.start()
+    t_snippet.join(timeout=5.0)
+    assert not t_snippet.is_alive(), "GC finalizer snippet hung on lock acquisition"
 
     # Inject mgr1's finalizer into the exact acquisition window of mgr2's
     # .reset.lock (after the OS lock is held, before _acquire returns).
