@@ -475,7 +475,9 @@ def test_eviction_chooses_coldest_when_capacity_exceeded(
     storage = LocalFSBackend(root=remote)
     loc_a = _locator("demo", 10, str(remote), raw_name="a.bin", raw_bytes=len(data_a))
     loc_b = _locator("demo", 11, str(remote), raw_name="b.bin", raw_bytes=len(data_b))
-    loc_c = _locator("demo", 12, str(remote), raw_name="c.bin", raw_bytes=len(data_c))
+    loc_c = _locator(
+        "demo", 12, str(remote), raw_name="c.bin", raw_bytes=len(data_c)
+    )
 
     mgr = _make_manager(
         cache_root, storage, [loc_a, loc_b, loc_c], limit_bytes=6 * 1024
@@ -1600,6 +1602,11 @@ def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
     mgr1.resolve(loc)
     assert mgr1._shared is not None
     old_shm_names = dict(mgr1._shared.shm_names)
+
+    # Also test the exact snippet from review feedback simulating GC mid-drain:
+    with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
+        with manager_mod._PENDING_RELEASES_LOCK:
+            mgr1._close_finalizer()  # should not hang with SimpleQueue
 
     # Inject mgr1's finalizer into the exact acquisition window of mgr2's
     # .reset.lock (after the OS lock is held, before _acquire returns).
